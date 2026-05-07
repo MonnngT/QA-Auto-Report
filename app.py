@@ -11,8 +11,8 @@ from google.oauth2.service_account import Credentials
 # ==========================================
 # 1. 页面配置
 # ==========================================
-st.set_page_config(page_title="风扇组件检验录入系统", page_icon="⚙️", layout="wide")
-st.title("⚙️ 质量检验数据自动采集系统 V4.0")
+st.set_page_config(page_title="质量检验数据自动采集系统", page_icon="⚙️", layout="wide")
+st.title("⚙️ 质量检验数据自动采集系统")
 st.markdown("---")
 st.info("💡 **操作指南**:上传单据 ➡️ AI 自动提取 ➡️ 自动存入云端 ➡️ 查看图表 ➡️ 下载报表")
 
@@ -219,14 +219,12 @@ if img_uploads:
         progress = st.progress(0)
         success_count = 0
         all_new_rows = []
-        used_model_set = set()
         error_messages = []
 
         for i, file in enumerate(img_uploads):
             try:
                 img = Image.open(file)
-                response, used_model = call_gemini_with_fallback(ocr_prompt, img)
-                used_model_set.add(used_model)
+                response, _ = call_gemini_with_fallback(ocr_prompt, img)
 
                 csv_content = (
                     response.text.strip().replace("```csv", "").replace("```", "").strip()
@@ -258,7 +256,6 @@ if img_uploads:
                 st.success(
                     f"✅ 成功识别 {success_count}/{len(img_uploads)} 张图片,"
                     f"新增 {len(combined_new)} 条记录并已同步到云端。"
-                    f"使用模型:{', '.join(used_model_set)}"
                 )
             except Exception as e:
                 st.error(f"❌ 写入云端失败:{e}")
@@ -279,6 +276,8 @@ if not st.session_state.batch_records.empty:
     df_editable = df_display.copy()
     df_editable.insert(0, "🗑️删除", False)
 
+    st.caption("💡 提示:可直接在表格中修改 **描述、检验数量、检验员、开始时间、结束时间**(识别错误时手动修正)。改完点【💾 保存修改到云端】生效。时长和效率会自动重新计算。")
+
     edited_df = st.data_editor(
         df_editable,
         use_container_width=True,
@@ -289,22 +288,34 @@ if not st.session_state.batch_records.empty:
                 help="勾选要删除的行,然后点击下方【删除选中行】",
                 default=False,
             ),
-            "时长(分钟)": st.column_config.NumberColumn(format="%.1f"),
-            "效率(件/分钟)": st.column_config.NumberColumn(format="%.2f"),
+            "时长(分钟)": st.column_config.NumberColumn(format="%.1f", disabled=True, help="由开始/结束时间自动计算"),
+            "效率(件/分钟)": st.column_config.NumberColumn(format="%.2f", disabled=True, help="由检验数量÷时长自动计算"),
         },
-        disabled=[c for c in df_editable.columns if c != "🗑️删除"],
+        # 只锁定计算列,5 列原始数据允许编辑
+        disabled=["时长(分钟)", "效率(件/分钟)"],
         key="data_editor",
     )
 
-    col_del, col_dl, col_clear, col_refresh = st.columns(4)
+    col_save, col_del, col_dl, col_clear, col_refresh = st.columns(5)
+
+    with col_save:
+        if st.button("💾 保存修改", type="primary", use_container_width=True):
+            # 取出编辑后的 5 列原始数据(去掉删除列和计算列)
+            updated = edited_df[COLUMNS].copy().reset_index(drop=True)
+            try:
+                with st.spinner("☁️ 正在保存到云端..."):
+                    overwrite_sheet(updated)
+                st.session_state.batch_records = updated
+                st.success("✅ 修改已保存到云端")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ 保存失败:{e}")
 
     with col_del:
         if st.button("🗑️ 删除选中行", use_container_width=True):
             keep_mask = ~edited_df["🗑️删除"].fillna(False)
-            kept_indices = edited_df.index[keep_mask].tolist()
-            new_records = (
-                st.session_state.batch_records.loc[kept_indices].reset_index(drop=True)
-            )
+            # 同时保留用户在其他列的编辑内容
+            new_records = edited_df.loc[keep_mask, COLUMNS].reset_index(drop=True)
             try:
                 with st.spinner("☁️ 正在同步到云端..."):
                     overwrite_sheet(new_records)
@@ -319,9 +330,9 @@ if not st.session_state.batch_records.empty:
         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
             df_display.to_excel(writer, index=False, sheet_name="检验记录")
         st.download_button(
-            label="📥 下载 (.xlsx)",
+            label="📥 下载",
             data=output.getvalue(),
-            file_name="风扇检验记录汇总表.xlsx",
+            file_name="检验记录汇总表.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
@@ -338,7 +349,7 @@ if not st.session_state.batch_records.empty:
                 st.error(f"❌ 清空云端失败:{e}")
 
     with col_refresh:
-        if st.button("🔄 从云端刷新", use_container_width=True):
+        if st.button("🔄 云端刷新", use_container_width=True):
             st.session_state.batch_records = load_records_from_sheet()
             st.rerun()
 
