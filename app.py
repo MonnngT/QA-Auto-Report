@@ -67,7 +67,7 @@ if img_source:
         with st.spinner("AI 正在深度解析印刷体与手写笔迹..."):
             try:
                 # 使用最新版 Flash 模型
-                model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                model = genai.GenerativeModel('gemini-1.5-flash')
                 response = model.generate_content([ocr_prompt, img])
                 
                 # 清理返回的 CSV 文本
