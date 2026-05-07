@@ -5,102 +5,112 @@ import pandas as pd
 import io
 
 # ==========================================
-# 1. 页面设置与样式
+# 1. 页面配置与初始化
 # ==========================================
-st.set_page_config(page_title="智能检验 2.0", page_icon="⚙️", layout="centered")
-st.title("⚙️ 智能检验数据自动录入系统 V2.0")
-st.markdown("---")
+st.set_page_config(page_title="智能检验批量录入系统V2", page_icon="⚙️", layout="centered")
+st.title("⚙️ 智能检验单自动录入系统 V2.0")
+st.markdown("**说明：** 拍摄包含手写“开始/结束时间”的单据 ➡️ AI自动提取 ➡️ 自动累加记录 ➡️ 统一下载")
+
+# 初始化 Session State，用于存放累计的识别数据
+if 'all_data' not in st.session_state:
+    st.session_state.all_data = pd.DataFrame()
 
 # ==========================================
-# 2. 初始化批量累计表 (Session State)
-# ==========================================
-if 'batch_data' not in st.session_state:
-    st.session_state.batch_data = pd.DataFrame()
-
-# ==========================================
-# 3. 加载 API Key
+# 2. API Key 配置 (从 Secrets 读取)
 # ==========================================
 try:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
 except Exception:
-    st.error("⚠️ 未在 Secrets 中发现 GEMINI_API_KEY，请检查后台设置。")
+    st.error("⚠️ 未检测到 API Key，请确保在 Streamlit 后台 Secrets 中配置了 GEMINI_API_KEY")
     st.stop()
 
 # ==========================================
-# 4. 拍照/上传区
+# 3. 图像获取区 (支持拍照和上传)
 # ==========================================
-st.subheader("📸 第一步：拍摄包含手写时间的数据单")
-img_source = st.camera_input("点击拍照") or st.file_uploader("或上传图片", type=['jpg','png','jpeg'])
+st.markdown("---")
+st.subheader("📸 第一步：获取检验单照片")
+
+img_camera = st.camera_input("直接拍照")
+img_upload = st.file_uploader("或者从相册选择图片", type=['jpg', 'jpeg', 'png'])
+
+img_source = img_camera or img_upload
 
 if img_source:
     img = Image.open(img_source)
-    
+    with st.expander("预览已拍摄的照片", expanded=False):
+        st.image(img, use_container_width=True)
+
     # ==========================================
-    # 5. 针对新表头优化的 AI 提示词
+    # 4. AI 智能提取逻辑 (针对新表头优化)
     # ==========================================
-    prompt = """
-    你是一个专业的工业数据提取专家。图片中是一张检验单，包含电脑打印的文字和人工手写的检验记录。
+    # 提示词专门适配：描述, 检验数量, 检验员, 开始时间, 结束时间
+    ocr_prompt = """
+    你是一个专业的工业现场数据录入员。图片是一张出货检验单，包含电脑打印的文字和人工手写的记录。
     
-    任务：精准提取每行数据，忽略不相关的列。
+    任务：精准提取每行的数据。
+    我只需要你提取并整理出以下 5 列数据：
+    1. 描述 (通常是电脑打印的长字符串，如 "788/9-9/36/PAG...")
+    2. 检验数量 (手写的数字)
+    3. 检验员 (手写的姓名)
+    4. 开始时间 (手写的时间，格式如 11:30)
+    5. 结束时间 (手写的时间，格式如 11:45)
     
-    我只需要你返回以下 5 列数据：
-    1. 描述 (印刷的长字符串描述)
-    2. 检验数量 (手写数字)
-    3. 检验员 (手写姓名)
-    4. 开始时间 (手写的时间点，如 11:30)
-    5. 结束时间 (手写的时间点，如 11:40)
-    
-    提取规则：
-    - 请识别图片中最后几列手写的“开始时间”和“结束时间”。
-    - 仅返回标准的 CSV 格式纯文本。
-    - **严禁**返回任何 Markdown 标记（如 ```csv）。
-    - 表头必须严格是：描述,检验数量,检验员,开始时间,结束时间
-    - 如果手写部分缺失，对应的单元格请留空，但必须保留“描述”。
+    要求：
+    - 严格按照这5个表头输出。忽略图片中其他的列（如编号、原数量等）。
+    - 即使某一行只有打印的“描述”而没有手写数据，也必须保留该行，手写列留空即可。
+    - 只返回标准的 CSV 格式纯文本，不要包含任何 Markdown 标记 (如 ```csv)。
+    - CSV 的表头必须严格是：描述,检验数量,检验员,开始时间,结束时间
     """
 
-    if st.button("🚀 识别并加入待下载列表", type="primary", use_container_width=True):
-        with st.spinner("AI 正在解析手写笔迹并同步数据..."):
+    if st.button("🚀 识别并加入汇总表", type="primary", use_container_width=True):
+        with st.spinner("AI 正在深度解析笔迹..."):
             try:
+                # 调用 Gemini 1.5 Flash 模型
                 model = genai.GenerativeModel('gemini-1.5-flash')
-                response = model.generate_content([prompt, img])
+                response = model.generate_content([ocr_prompt, img])
                 
-                # 清洗 CSV 文本
-                csv_data = response.text.strip().replace("```csv", "").replace("```", "")
-                current_df = pd.read_csv(io.StringIO(csv_data))
+                # 清理返回的文本
+                csv_text = response.text.strip().replace("```csv", "").replace("```", "")
                 
-                # 追加到总表
-                st.session_state.batch_data = pd.concat([st.session_state.batch_data, current_df], ignore_index=True)
-                st.success(f"已成功识别并累计！目前总表共有 {len(st.session_state.batch_data)} 条记录。")
+                # 转换为 DataFrame
+                current_df = pd.read_csv(io.StringIO(csv_text))
+                current_df.columns = current_df.columns.str.strip()
+                
+                # 将本次识别的数据拼接到总表中
+                st.session_state.all_data = pd.concat([st.session_state.all_data, current_df], ignore_index=True)
+                
+                st.success(f"✅ 提取成功！已增加 {len(current_df)} 条记录。")
             except Exception as e:
-                st.error(f"识别失败，请确保图片清晰。详情: {e}")
+                st.error(f"识别过程出错。请确保图片清晰且 API 配置正确。\n错误详情：{e}")
 
 # ==========================================
-# 6. 数据管理与统一下载
+# 5. 数据展示与统一下载
 # ==========================================
 st.markdown("---")
 st.subheader("🗂️ 第二步：累计记录预览与下载")
 
-if not st.session_state.batch_data.empty:
-    # 实时展示累计的数据
-    st.dataframe(st.session_state.batch_data, use_container_width=True)
+if not st.session_state.all_data.empty:
+    # 展示累计的大表
+    st.dataframe(st.session_state.all_data, use_container_width=True)
 
-    # 导出 Excel
-    output = io.BytesIO()
-    st.session_state.batch_data.to_excel(output, index=False, engine='xlsxwriter')
-    
+    # 准备 Excel 下载
+    towrite = io.BytesIO()
+    st.session_state.all_data.to_excel(towrite, index=False, engine='xlsxwriter')
+    towrite.seek(0)
+
     col_dl, col_cl = st.columns(2)
     with col_dl:
         st.download_button(
-            label="📥 统一下载全部累计数据",
-            data=output.getvalue(),
-            file_name="批量检验记录汇总.xlsx",
+            label="📥 统一下载全部累计数据 (.xlsx)",
+            data=towrite,
+            file_name="批量检验记录报表.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
     with col_cl:
-        if st.button("🗑️ 清空当前历史记录", use_container_width=True):
-            st.session_state.batch_data = pd.DataFrame()
+        if st.button("🗑️ 清空所有记录", use_container_width=True):
+            st.session_state.all_data = pd.DataFrame()
             st.rerun()
 else:
-    st.info("当前还没有识别任何数据，请在上方拍照。")
+    st.info("当前暂无累计记录，请在上方拍照识别。")
