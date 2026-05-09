@@ -7,6 +7,7 @@ import io
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
+from pdf2image import convert_from_bytes
 
 # ==========================================
 # 1. 页面配置
@@ -179,88 +180,117 @@ def calc_duration_and_efficiency(df):
 
 
 # ==========================================
-# 6. 图像上传与识别
+# 6. 图像/PDF 上传与识别
 # ==========================================
-st.subheader("📤 第一步:上传检验单图片")
+def expand_uploads_to_images(files):
+    """把上传的文件(图片或 PDF)统一展开成 [(显示名, PIL.Image), ...]。
+    PDF 会被逐页转成图片。"""
+    items = []
+    for f in files:
+        name = f.name
+        suffix = name.lower().rsplit(".", 1)[-1]
+        if suffix == "pdf":
+            try:
+                pdf_bytes = f.read()
+                # dpi=200 是清晰度和速度的平衡点;手写字识别建议 ≥200
+                pages = convert_from_bytes(pdf_bytes, dpi=200)
+                for idx, page_img in enumerate(pages, start=1):
+                    items.append((f"{name} - 第{idx}页", page_img))
+            except Exception as e:
+                st.error(f"❌ PDF 文件 `{name}` 解析失败:{e}")
+        else:
+            try:
+                items.append((name, Image.open(f)))
+            except Exception as e:
+                st.error(f"❌ 图片文件 `{name}` 打开失败:{e}")
+    return items
+
+
+st.subheader("📤 第一步:上传检验单(支持图片或 PDF)")
 img_uploads = st.file_uploader(
-    "支持一次选择多张图片",
-    type=["jpg", "jpeg", "png"],
+    "支持一次选择多张图片或多个 PDF 文件;PDF 多页将自动逐页识别",
+    type=["jpg", "jpeg", "png", "pdf"],
     accept_multiple_files=True,
 )
 
 if img_uploads:
-    st.write(f"已选择 **{len(img_uploads)}** 张图片")
-    with st.expander("🔍 预览所有图片", expanded=False):
-        cols = st.columns(min(len(img_uploads), 3))
-        for idx, file in enumerate(img_uploads):
-            with cols[idx % 3]:
-                st.image(Image.open(file), caption=file.name, use_container_width=True)
+    # 展开成统一的图片列表(PDF 会按页拆开)
+    image_items = expand_uploads_to_images(img_uploads)
 
-    ocr_prompt = """
-    你是一位专业的质量工程师助手。图片中是一张出货检验记录表,包含印刷文字和手写记录。
+    if image_items:
+        st.write(
+            f"已加载 **{len(img_uploads)}** 个文件,共 **{len(image_items)}** 张待识别图片"
+        )
+        with st.expander("🔍 预览所有待识别图片", expanded=False):
+            cols = st.columns(min(len(image_items), 3))
+            for idx, (display_name, img) in enumerate(image_items):
+                with cols[idx % 3]:
+                    st.image(img, caption=display_name, use_container_width=True)
 
-    任务:精准提取每行数据,并忽略无关信息。
-    我只需要你提取并返回以下 5 列数据:
-    1. 描述 (印刷的长描述。注意:原始表格的表头可能写作"描述"或"风扇描述",两者是同一列,统一按"描述"输出)
-    2. 检验数量 (人工手写的数字。原始表头可能写作"检验数量"或"风扇数量"等,均按"检验数量"输出)
-    3. 检验员 (人工手写的姓名,如 '杨', '王', '田'。原始表头可能写作"检验员"或"检验人员")
-    4. 开始时间 (手写的时间,例如 11:30)
-    5. 结束时间 (手写的时间,例如 11:35)
+        ocr_prompt = """
+        你是一位专业的质量工程师助手。图片中是一张出货检验记录表,包含印刷文字和手写记录。
 
-    提取规则:
-    - 严格按照这5个表头输出:描述,检验数量,检验员,开始时间,结束时间
-    - 哪怕某一行只有"描述"而没有手写数据,也请保留该行,其他单元格留空。
-    - 时间统一输出为 HH:MM 格式(例如 09:05、14:30)。
-    - 请直接返回标准的 CSV 格式纯文本,不要包含任何 Markdown 标记。
-    """
+        任务:精准提取每行数据,并忽略无关信息。
+        我只需要你提取并返回以下 5 列数据:
+        1. 描述 (印刷的长描述。注意:原始表格的表头可能写作"描述"或"风扇描述",两者是同一列,统一按"描述"输出)
+        2. 检验数量 (人工手写的数字。原始表头可能写作"检验数量"或"风扇数量"等,均按"检验数量"输出)
+        3. 检验员 (人工手写的姓名,如 '杨', '王', '田'。原始表头可能写作"检验员"或"检验人员")
+        4. 开始时间 (手写的时间,例如 11:30)
+        5. 结束时间 (手写的时间,例如 11:35)
 
-    if st.button("🚀 批量识别并保存到云端", type="primary", use_container_width=True):
-        progress = st.progress(0)
-        success_count = 0
-        all_new_rows = []
-        error_messages = []
+        提取规则:
+        - 严格按照这5个表头输出:描述,检验数量,检验员,开始时间,结束时间
+        - 哪怕某一行只有"描述"而没有手写数据,也请保留该行,其他单元格留空。
+        - 时间统一输出为 HH:MM 格式(例如 09:05、14:30)。
+        - 请直接返回标准的 CSV 格式纯文本,不要包含任何 Markdown 标记。
+        """
 
-        for i, file in enumerate(img_uploads):
-            try:
-                img = Image.open(file)
-                response, _ = call_gemini_with_fallback(ocr_prompt, img)
+        if st.button("🚀 批量识别并保存到云端", type="primary", use_container_width=True):
+            progress = st.progress(0)
+            success_count = 0
+            all_new_rows = []
+            error_messages = []
 
-                csv_content = (
-                    response.text.strip().replace("```csv", "").replace("```", "").strip()
-                )
-                current_df = pd.read_csv(io.StringIO(csv_content))
-                current_df.columns = current_df.columns.str.strip()
+            for i, (display_name, img) in enumerate(image_items):
+                try:
+                    response, _ = call_gemini_with_fallback(ocr_prompt, img)
 
-                # 仅保留 5 个标准列
-                for col in COLUMNS:
-                    if col not in current_df.columns:
-                        current_df[col] = ""
-                current_df = current_df[COLUMNS]
+                    csv_content = (
+                        response.text.strip().replace("```csv", "").replace("```", "").strip()
+                    )
+                    current_df = pd.read_csv(io.StringIO(csv_content))
+                    current_df.columns = current_df.columns.str.strip()
 
-                all_new_rows.append(current_df)
-                success_count += 1
-            except Exception as e:
-                error_messages.append(f"❌ 图片 `{file.name}` 识别失败:{e}")
-            finally:
-                progress.progress((i + 1) / len(img_uploads))
+                    # 仅保留 5 个标准列
+                    for col in COLUMNS:
+                        if col not in current_df.columns:
+                            current_df[col] = ""
+                    current_df = current_df[COLUMNS]
 
-        # 一次性写入云端,避免多次 API 调用
-        if all_new_rows:
-            combined_new = pd.concat(all_new_rows, ignore_index=True)
-            try:
-                append_records_to_sheet(combined_new)
-                st.session_state.batch_records = pd.concat(
-                    [st.session_state.batch_records, combined_new], ignore_index=True
-                )
-                st.success(
-                    f"✅ 成功识别 {success_count}/{len(img_uploads)} 张图片,"
-                    f"新增 {len(combined_new)} 条记录并已同步到云端。"
-                )
-            except Exception as e:
-                st.error(f"❌ 写入云端失败:{e}")
+                    all_new_rows.append(current_df)
+                    success_count += 1
+                except Exception as e:
+                    error_messages.append(f"❌ `{display_name}` 识别失败:{e}")
+                finally:
+                    progress.progress((i + 1) / len(image_items))
 
-        for msg in error_messages:
-            st.warning(msg)
+            # 一次性写入云端,避免多次 API 调用
+            if all_new_rows:
+                combined_new = pd.concat(all_new_rows, ignore_index=True)
+                try:
+                    append_records_to_sheet(combined_new)
+                    st.session_state.batch_records = pd.concat(
+                        [st.session_state.batch_records, combined_new], ignore_index=True
+                    )
+                    st.success(
+                        f"✅ 成功识别 {success_count}/{len(image_items)} 张图片,"
+                        f"新增 {len(combined_new)} 条记录并已同步到云端。"
+                    )
+                except Exception as e:
+                    st.error(f"❌ 写入云端失败:{e}")
+
+            for msg in error_messages:
+                st.warning(msg)
 
 
 # ==========================================
