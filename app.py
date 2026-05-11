@@ -321,6 +321,9 @@ if not st.session_state.batch_records.empty:
 
     df_editable = df_display.copy()
     df_editable.insert(0, "🗑️删除", False)
+    # 行号从 1 开始(更符合人类阅读习惯,从 0 开始容易看错)
+    df_editable.index = range(1, len(df_editable) + 1)
+    df_editable.index.name = "序号"
 
     st.caption("💡 提示:可直接在表格中修改 **描述、检验数量、检验员、开始时间、结束时间**(识别错误时手动修正)。改完点【💾 保存修改到云端】生效。时长和效率会自动重新计算。")
 
