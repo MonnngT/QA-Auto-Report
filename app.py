@@ -7,7 +7,7 @@ import io
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
-from pdf2image import convert_from_bytes
+import pypdfium2 as pdfium
 
 # ==========================================
 # 1. 页面配置
@@ -184,7 +184,7 @@ def calc_duration_and_efficiency(df):
 # ==========================================
 def expand_uploads_to_images(files):
     """把上传的文件(图片或 PDF)统一展开成 [(显示名, PIL.Image), ...]。
-    PDF 会被逐页转成图片。"""
+    PDF 会被逐页转成图片。使用 pypdfium2(纯 Python,无需系统依赖)。"""
     items = []
     for f in files:
         name = f.name
@@ -192,10 +192,13 @@ def expand_uploads_to_images(files):
         if suffix == "pdf":
             try:
                 pdf_bytes = f.read()
-                # dpi=200 是清晰度和速度的平衡点;手写字识别建议 ≥200
-                pages = convert_from_bytes(pdf_bytes, dpi=200)
-                for idx, page_img in enumerate(pages, start=1):
-                    items.append((f"{name} - 第{idx}页", page_img))
+                pdf = pdfium.PdfDocument(pdf_bytes)
+                # scale=2.0 约等于 200 DPI(默认 72 DPI × 2);手写识别建议 ≥2.0
+                for idx in range(len(pdf)):
+                    page = pdf[idx]
+                    pil_img = page.render(scale=2.5).to_pil()
+                    items.append((f"{name} - 第{idx + 1}页", pil_img))
+                pdf.close()
             except Exception as e:
                 st.error(f"❌ PDF 文件 `{name}` 解析失败:{e}")
         else:
@@ -240,7 +243,8 @@ if img_uploads:
 
         提取规则:
         - 严格按照这5个表头输出:描述,检验数量,检验员,开始时间,结束时间
-        - 哪怕某一行只有"描述"而没有手写数据,也请保留该行,其他单元格留空。
+        - **只输出有手写记录的行**:如果某一行的"检验数量"、"检验员"、"开始时间"、"结束时间"这 4 个手写字段全部为空(即整行只有印刷描述,没人手填过),请直接跳过该行,不要返回。
+        - 只要 4 个手写字段中任意一个填了内容,就保留该行,其他空字段留空。
         - 时间统一输出为 HH:MM 格式(例如 09:05、14:30)。
         - 请直接返回标准的 CSV 格式纯文本,不要包含任何 Markdown 标记。
         """
@@ -266,6 +270,19 @@ if img_uploads:
                         if col not in current_df.columns:
                             current_df[col] = ""
                     current_df = current_df[COLUMNS]
+
+                    # 兜底过滤:4 个手写字段全为空的行直接丢弃(防止 AI 没听指令)
+                    hand_cols = ["检验数量", "检验员", "开始时间", "结束时间"]
+                    def _is_blank(v):
+                        return pd.isna(v) or str(v).strip() in ("", "nan", "None")
+                    mask_has_data = current_df[hand_cols].apply(
+                        lambda row: not all(_is_blank(v) for v in row), axis=1
+                    )
+                    current_df = current_df[mask_has_data].reset_index(drop=True)
+
+                    if current_df.empty:
+                        # 整页都没有手写记录,跳过
+                        continue
 
                     all_new_rows.append(current_df)
                     success_count += 1
