@@ -29,7 +29,7 @@ except Exception:
 
 GSHEET_ID = st.secrets.get("GSHEET_ID", "")
 WORKSHEET_NAME = "检验记录"  # 工作表名(子表),程序会自动创建
-COLUMNS = ["描述", "检验数量", "检验员", "开始时间", "结束时间"]
+COLUMNS = ["描述", "数量", "出货日期", "检验数量", "检验员", "开始时间", "结束时间"]
 
 
 @st.cache_resource(show_spinner=False)
@@ -55,7 +55,7 @@ def get_worksheet():
     # 如果第一行是空的(全新表),也补上表头
     first_row = ws.row_values(1)
     if not first_row:
-        ws.update("A1:E1", [COLUMNS])
+        ws.update("A1:G1", [COLUMNS])
     return ws
 
 
@@ -158,6 +158,11 @@ def calc_duration_and_efficiency(df):
     if df.empty:
         return df
     df = df.copy()
+
+    # 检验员字段统一大写(避免 y 和 Y 在图表里分成两组)
+    if "检验员" in df.columns:
+        df["检验员"] = df["检验员"].astype(str).str.strip().str.upper().replace({"NAN": "", "NONE": ""})
+
     starts = df["开始时间"].apply(parse_time)
     ends = df["结束时间"].apply(parse_time)
     durations = []
@@ -175,6 +180,13 @@ def calc_duration_and_efficiency(df):
     df["效率(件/分钟)"] = [
         round(q / d, 2) if (pd.notna(q) and d and d > 0) else None
         for q, d in zip(qty, df["时长(分钟)"])
+    ]
+
+    # 抽检率 = 检验数量 / 数量,百分比保留 1 位
+    total_qty = pd.to_numeric(df["数量"], errors="coerce")
+    df["抽检率(%)"] = [
+        round(q / t * 100, 1) if (pd.notna(q) and pd.notna(t) and t > 0) else None
+        for q, t in zip(qty, total_qty)
     ]
     return df
 
@@ -234,16 +246,18 @@ if img_uploads:
         你是一位专业的质量工程师助手。图片中是一张出货检验记录表,包含印刷文字和手写记录。
 
         任务:精准提取每行数据,并忽略无关信息。
-        我只需要你提取并返回以下 5 列数据:
-        1. 描述 (印刷的长描述。注意:原始表格的表头可能写作"描述"或"风扇描述",两者是同一列,统一按"描述"输出)
-        2. 检验数量 (人工手写的数字。原始表头可能写作"检验数量"或"风扇数量"等,均按"检验数量"输出)
-        3. 检验员 (人工手写的姓名,如 '杨', '王', '田'。原始表头可能写作"检验员"或"检验人员")
-        4. 开始时间 (手写的时间,例如 11:30)
-        5. 结束时间 (手写的时间,例如 11:35)
+        我只需要你提取并返回以下 7 列数据:
+        1. 描述 (印刷的长描述。原始表头可能写作"描述"或"风扇描述",统一按"描述"输出)
+        2. 数量 (印刷的订单总数量。原始表头通常就叫"数量",代表这个订单一共有多少件,与"检验数量"不同)
+        3. 出货日期 (印刷的日期,如 "5/11"。保留原样输出,不要补全年份)
+        4. 检验数量 (人工手写的数字,代表实际抽检了多少件。原始表头可能写作"检验数量"或"风扇数量")
+        5. 检验员 (人工手写,可能是单个汉字姓如 '杨/王/田',也可能是汉字姓的首字母如 'Y/W/T'。统一规范化为**大写字母**输出:汉字"杨"输出"Y",汉字"王"输出"W",汉字"田"输出"T",汉字"周"输出"Z",其他汉字按拼音首字母大写。如果原本就是字母,统一转大写。)
+        6. 开始时间 (手写的时间,例如 11:30)
+        7. 结束时间 (手写的时间,例如 11:35)
 
         提取规则:
-        - 严格按照这5个表头输出:描述,检验数量,检验员,开始时间,结束时间
-        - **只输出有手写记录的行**:如果某一行的"检验数量"、"检验员"、"开始时间"、"结束时间"这 4 个手写字段全部为空(即整行只有印刷描述,没人手填过),请直接跳过该行,不要返回。
+        - 严格按照这7个表头输出:描述,数量,出货日期,检验数量,检验员,开始时间,结束时间
+        - **只输出有手写记录的行**:如果某一行的"检验数量"、"检验员"、"开始时间"、"结束时间"这 4 个手写字段全部为空,请直接跳过该行,不要返回。
         - 只要 4 个手写字段中任意一个填了内容,就保留该行,其他空字段留空。
         - 时间统一输出为 HH:MM 格式(例如 09:05、14:30)。
         - 请直接返回标准的 CSV 格式纯文本,不要包含任何 Markdown 标记。
@@ -325,7 +339,7 @@ if not st.session_state.batch_records.empty:
     df_editable.index = range(1, len(df_editable) + 1)
     df_editable.index.name = "序号"
 
-    st.caption("💡 提示:可直接在表格中修改 **描述、检验数量、检验员、开始时间、结束时间**(识别错误时手动修正)。改完点【💾 保存修改到云端】生效。时长和效率会自动重新计算。")
+    st.caption("💡 提示:可直接在表格中修改 **描述、数量、出货日期、检验数量、检验员、开始时间、结束时间**(识别错误时手动修正)。改完点【💾 保存修改】生效。时长、效率、抽检率会自动重新计算。")
 
     edited_df = st.data_editor(
         df_editable,
@@ -339,9 +353,10 @@ if not st.session_state.batch_records.empty:
             ),
             "时长(分钟)": st.column_config.NumberColumn(format="%.1f", disabled=True, help="由开始/结束时间自动计算"),
             "效率(件/分钟)": st.column_config.NumberColumn(format="%.2f", disabled=True, help="由检验数量÷时长自动计算"),
+            "抽检率(%)": st.column_config.NumberColumn(format="%.1f", disabled=True, help="由检验数量÷数量自动计算"),
         },
-        # 只锁定计算列,5 列原始数据允许编辑
-        disabled=["时长(分钟)", "效率(件/分钟)"],
+        # 只锁定计算列,7 列原始数据允许编辑
+        disabled=["时长(分钟)", "效率(件/分钟)", "抽检率(%)"],
         key="data_editor",
     )
 
@@ -431,14 +446,16 @@ if not st.session_state.batch_records.empty:
             # 顶部摘要信息
             total_qty = pd.to_numeric(model_df["检验数量"], errors="coerce").sum()
             avg_eff = model_df["效率(件/分钟)"].mean()
+            avg_rate = pd.to_numeric(model_df.get("抽检率(%)", pd.Series(dtype=float)), errors="coerce").mean()
             inspector_count = model_df["检验员"].nunique()
             record_count = len(model_df)
 
-            m1, m2, m3, m4 = st.columns(4)
+            m1, m2, m3, m4, m5 = st.columns(5)
             m1.metric("📦 总检验数量", f"{int(total_qty)}")
             m2.metric("⚡ 平均效率", f"{avg_eff:.2f} 件/分")
-            m3.metric("👥 涉及检验员", f"{inspector_count} 人")
-            m4.metric("📝 记录条数", f"{record_count} 条")
+            m3.metric("🎯 平均抽检率", f"{avg_rate:.1f}%" if pd.notna(avg_rate) else "N/A")
+            m4.metric("👥 涉及检验员", f"{inspector_count} 人")
+            m5.metric("📝 记录条数", f"{record_count} 条")
 
             # 按检验员聚合该型号的效率
             per_inspector = (
