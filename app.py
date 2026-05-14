@@ -426,6 +426,15 @@ if not st.session_state.batch_records.empty:
     chart_df = df_display.dropna(subset=["效率(件/分钟)", "描述", "检验员"]).copy()
     chart_df = chart_df[chart_df["效率(件/分钟)"] > 0]
 
+    # 统一清洗:把描述和检验员转为干净的字符串,排除 nan/空字符串这些脏数据
+    if not chart_df.empty:
+        for col in ["描述", "检验员"]:
+            chart_df[col] = chart_df[col].astype(str).str.strip()
+        chart_df = chart_df[
+            ~chart_df["描述"].isin(["", "nan", "None"])
+            & ~chart_df["检验员"].isin(["", "nan", "None"])
+        ]
+
     if chart_df.empty:
         st.info("暂无可用于图表分析的有效数据(需要包含描述、检验员、开始时间、结束时间、检验数量)。")
     else:
@@ -433,7 +442,14 @@ if not st.session_state.batch_records.empty:
 
         with tab1:
             # 选型号下拉框
-            model_list = sorted(chart_df["描述"].dropna().unique().tolist())
+            # 先转字符串再去重排序,避免混合类型(字符串 + NaN/数字)导致 sorted 报错
+            model_list = sorted(
+                set(
+                    str(x).strip()
+                    for x in chart_df["描述"].dropna().tolist()
+                    if str(x).strip() not in ("", "nan", "None")
+                )
+            )
             selected_model = st.selectbox(
                 "选择一个型号查看该型号下不同检验员的效率",
                 options=model_list,
