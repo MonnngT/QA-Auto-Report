@@ -1,4 +1,5 @@
 import io
+import csv
 import re
 from datetime import datetime
 
@@ -312,6 +313,30 @@ def is_blank(value):
     return pd.isna(value) or str(value).strip() in ("", "nan", "None", "NONE")
 
 
+def parse_ocr_csv(csv_content):
+    rows = []
+    reader = csv.reader(io.StringIO(csv_content))
+
+    for raw_row in reader:
+        row = [str(value).strip() for value in raw_row]
+        if not row or all(value == "" for value in row):
+            continue
+        if row[0] == "客户代码":
+            continue
+
+        if len(row) > len(COLUMNS):
+            # Extra commas usually come from the long description. Keep the first
+            # three printed fields and the last six fields, then merge the middle
+            # cells back into 描述.
+            row = row[:3] + [",".join(row[3:-6])] + row[-6:]
+        elif len(row) < len(COLUMNS):
+            row = row + [""] * (len(COLUMNS) - len(row))
+
+        rows.append(row[: len(COLUMNS)])
+
+    return pd.DataFrame(rows, columns=COLUMNS)
+
+
 st.subheader("📤 第一步：上传检验单（支持图片或 PDF）")
 img_uploads = st.file_uploader(
     "支持一次选择多张图片或多个 PDF 文件；PDF 多页会自动逐页识别",
@@ -359,6 +384,7 @@ if img_uploads:
 - 对表格下方的续写行，如果某些打印字段缺失但手写检验记录存在，也要返回该行；缺失字段留空，不要因为不在打印网格内就忽略。
 - 勾、√、对勾、短竖线或类似标记如果出现在“检验数量”列，通常表示检验 1 件；如果同格能看出明确数字，以数字为准。
 - 严格返回标准 CSV 纯文本，不要包含 Markdown、解释、编号或代码块。
+- 如果某个字段内容里包含英文逗号，请把该字段用英文双引号包起来，确保每一行恰好只有 10 个 CSV 字段。
 """
 
         if st.button("🚀 批量识别并保存到云端", type="primary", use_container_width=True):
@@ -372,7 +398,7 @@ if img_uploads:
                     ocr_img = prepare_image_for_ocr(img)
                     response, model_name = call_gemini_with_fallback(ocr_prompt, ocr_img)
                     csv_content = response.text.strip().replace("```csv", "").replace("```", "").strip()
-                    current_df = pd.read_csv(io.StringIO(csv_content), dtype=str)
+                    current_df = parse_ocr_csv(csv_content)
                     current_df = standardize_records(current_df)
 
                     mask_has_data = current_df[HANDWRITTEN_COLUMNS].apply(
