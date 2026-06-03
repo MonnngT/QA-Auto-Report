@@ -168,6 +168,8 @@ MODEL_CANDIDATES = [
     "gemini-2.5-flash-lite",
 ]
 
+MAX_OCR_IMAGE_WIDTH = 1800
+
 
 def call_gemini_with_fallback(prompt, image):
     last_error = None
@@ -252,6 +254,17 @@ def expand_uploads_to_images(files):
     return items
 
 
+def prepare_image_for_ocr(image):
+    image = image.convert("RGB")
+    width, height = image.size
+    if width <= MAX_OCR_IMAGE_WIDTH:
+        return image
+
+    ratio = MAX_OCR_IMAGE_WIDTH / width
+    new_size = (MAX_OCR_IMAGE_WIDTH, int(height * ratio))
+    return image.resize(new_size, Image.Resampling.LANCZOS)
+
+
 def is_blank(value):
     return pd.isna(value) or str(value).strip() in ("", "nan", "None", "NONE")
 
@@ -297,6 +310,9 @@ if img_uploads:
 提取规则：
 - 只输出有检验记录的行：如果某一行的“检验数量、检验人员、开始时间、结束时间”四项全部为空，跳过该行。
 - 如果四个检验记录字段中任意一个有内容，就保留该行，其余空字段留空。
+- 有些记录可能写在打印表格外侧或表格下方空白区，但仍然按原表格列的位置横向对齐。请把这些手写续写行也当作正常行识别：写在客户代码列下的是客户代码，写在生产工单号/客户料号/描述/数量/出货日期/检验数量/检验人员/开始时间/结束时间列下的内容分别填入对应字段。
+- 对表格下方的续写行，如果某些打印字段缺失但手写检验记录存在，也要返回该行；缺失字段留空，不要因为不在打印网格内就忽略。
+- 勾、√、对勾、短竖线或类似标记如果出现在“检验数量”列，通常表示检验 1 件；如果同格能看出明确数字，以数字为准。
 - 严格返回标准 CSV 纯文本，不要包含 Markdown、解释、编号或代码块。
 """
 
@@ -308,7 +324,8 @@ if img_uploads:
 
             for idx, (display_name, img) in enumerate(image_items):
                 try:
-                    response, model_name = call_gemini_with_fallback(ocr_prompt, img)
+                    ocr_img = prepare_image_for_ocr(img)
+                    response, model_name = call_gemini_with_fallback(ocr_prompt, ocr_img)
                     csv_content = response.text.strip().replace("```csv", "").replace("```", "").strip()
                     current_df = pd.read_csv(io.StringIO(csv_content), dtype=str)
                     current_df = standardize_records(current_df)
