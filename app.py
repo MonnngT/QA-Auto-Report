@@ -55,7 +55,7 @@ def looks_like_customer_code(value):
 
 
 def fix_shifted_print_columns(df):
-    df = df.copy()
+    df = df.copy().astype(object)
     required = ["客户代码", "生产工单号", "客户料号", "描述", "数量", "出货日期"]
     if any(col not in df.columns for col in required):
         return df
@@ -67,7 +67,10 @@ def fix_shifted_print_columns(df):
         # Gemini sometimes skips the left customer-code column and starts from the
         # work-order column. Detect that clear pattern and move the printed fields back.
         if looks_like_work_order(customer_code) and not looks_like_work_order(work_order):
-            old_values = {col: row.get(col, "") for col in required}
+            old_values = {
+                col: "" if pd.isna(row.get(col, "")) else str(row.get(col, "")).strip()
+                for col in required
+            }
             df.at[idx, "客户代码"] = ""
             df.at[idx, "生产工单号"] = old_values["客户代码"]
             df.at[idx, "客户料号"] = old_values["生产工单号"]
