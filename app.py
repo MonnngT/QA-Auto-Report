@@ -1,4 +1,5 @@
 import io
+import re
 from datetime import datetime
 
 import google.generativeai as genai
@@ -45,6 +46,44 @@ OLD_COLUMNS = ["描述", "数量", "出货日期", "检验数量", "检验人员
 HANDWRITTEN_COLUMNS = ["检验数量", "检验人员", "开始时间", "结束时间"]
 
 
+def looks_like_work_order(value):
+    return bool(re.match(r"^SZ-\d+", str(value).strip(), flags=re.IGNORECASE))
+
+
+def looks_like_customer_code(value):
+    return bool(re.match(r"^\d{5,6}$", str(value).strip()))
+
+
+def fix_shifted_print_columns(df):
+    df = df.copy()
+    required = ["客户代码", "生产工单号", "客户料号", "描述", "数量", "出货日期"]
+    if any(col not in df.columns for col in required):
+        return df
+
+    for idx, row in df.iterrows():
+        customer_code = str(row.get("客户代码", "")).strip()
+        work_order = str(row.get("生产工单号", "")).strip()
+
+        # Gemini sometimes skips the left customer-code column and starts from the
+        # work-order column. Detect that clear pattern and move the printed fields back.
+        if looks_like_work_order(customer_code) and not looks_like_work_order(work_order):
+            old_values = {col: row.get(col, "") for col in required}
+            df.at[idx, "客户代码"] = ""
+            df.at[idx, "生产工单号"] = old_values["客户代码"]
+            df.at[idx, "客户料号"] = old_values["生产工单号"]
+            df.at[idx, "描述"] = old_values["客户料号"]
+            df.at[idx, "数量"] = old_values["描述"]
+            df.at[idx, "出货日期"] = old_values["数量"]
+
+        # If the customer code was accidentally filled with SO, discard it instead
+        # of keeping a misleading value. SO numbers are not part of the output schema.
+        customer_code = str(df.at[idx, "客户代码"]).strip()
+        if customer_code.upper().startswith("SZ-SO"):
+            df.at[idx, "客户代码"] = ""
+
+    return df
+
+
 def standardize_records(df):
     if df.empty:
         return pd.DataFrame(columns=COLUMNS)
@@ -83,6 +122,7 @@ def standardize_records(df):
             df[col] = ""
 
     df = df[COLUMNS]
+    df = fix_shifted_print_columns(df)
     for col in COLUMNS:
         df[col] = df[col].fillna("").astype(str).str.strip()
 
@@ -296,8 +336,8 @@ if img_uploads:
 客户代码,生产工单号,客户料号,描述,数量,出货日期,检验数量,检验人员,开始时间,结束时间
 
 字段说明：
-1. 客户代码：打印列，通常在最左侧，例如 103301。
-2. 生产工单号：打印列，表头可能为“生产工单号”，例如 SZ-040090。
+1. 客户代码：打印列，必须来自最左侧“客户代码”数字列，例如 103301、103294。不要把 SO 或生产工单号填到这里。
+2. 生产工单号：打印列，表头可能为“生产工单号”，通常格式为 SZ-040090、SZ-041317。
 3. 客户料号：打印列，表头可能为“客户料号”。
 4. 描述：打印的长描述，保留原始内容。
 5. 数量：打印的订单数量。
@@ -308,6 +348,8 @@ if img_uploads:
 10. 结束时间：人工填写时间，统一为 HH:MM 格式。
 
 提取规则：
+- 原表左侧通常依次是“客户代码、客户名称、SO、生产工单号、客户料号、描述、数量、出货日期...”。其中“客户名称”和“SO”必须忽略，但忽略后不要窜列：客户代码仍然取最左数字列，生产工单号仍然取 SZ- 开头的生产工单号列。
+- 输出前自检每一行：客户代码应该是 5-6 位数字；生产工单号应该以 SZ- 开头。如果客户代码是 SZ- 开头，说明列错位了，必须修正后再输出。
 - 只输出有检验记录的行：如果某一行的“检验数量、检验人员、开始时间、结束时间”四项全部为空，跳过该行。
 - 如果四个检验记录字段中任意一个有内容，就保留该行，其余空字段留空。
 - 有些记录可能写在打印表格外侧或表格下方空白区，但仍然按原表格列的位置横向对齐。请把这些手写续写行也当作正常行识别：写在客户代码列下的是客户代码，写在生产工单号/客户料号/描述/数量/出货日期/检验数量/检验人员/开始时间/结束时间列下的内容分别填入对应字段。
