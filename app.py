@@ -3,6 +3,7 @@ import google.generativeai as genai
 from PIL import Image
 import pandas as pd
 import io
+import re
 from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
@@ -41,6 +42,45 @@ COLUMNS = [
     "结束时间",
 ]
 
+COMPACT_DESCRIPTION_PATTERN = re.compile(
+    r"^\s*(?P<customer_code>\d{6})\s*[-－]\s*(?P<work_order>\d{6})\s+(?P<model>.+?)\s*$"
+)
+
+
+def _is_blank(v):
+    return pd.isna(v) or str(v).strip() in ("", "nan", "None", "NONE")
+
+
+def split_compact_description_fields(df):
+    """拆分类似 103234-042431 Z-5-T 的描述到客户代码/生产工单号/客户料号/描述。"""
+    if df.empty:
+        return pd.DataFrame(columns=COLUMNS)
+
+    df = df.copy()
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    for idx, row in df.iterrows():
+        description = str(row.get("描述", "")).strip()
+        match = COMPACT_DESCRIPTION_PATTERN.match(description)
+        if not match:
+            continue
+
+        customer_code = match.group("customer_code")
+        work_order = match.group("work_order")
+        model = match.group("model").strip()
+
+        if _is_blank(row.get("客户代码", "")):
+            df.at[idx, "客户代码"] = customer_code
+        if _is_blank(row.get("生产工单号", "")):
+            df.at[idx, "生产工单号"] = work_order
+        if _is_blank(row.get("客户料号", "")):
+            df.at[idx, "客户料号"] = model
+        df.at[idx, "描述"] = model
+
+    return df[COLUMNS]
+
 
 @st.cache_resource(show_spinner=False)
 def get_worksheet():
@@ -72,7 +112,7 @@ def get_worksheet():
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""
-        df = df[COLUMNS] if not df.empty else pd.DataFrame(columns=COLUMNS)
+        df = split_compact_description_fields(df[COLUMNS]) if not df.empty else pd.DataFrame(columns=COLUMNS)
         ws.clear()
         ws.append_row(COLUMNS)
         if not df.empty:
@@ -90,7 +130,7 @@ def load_records_from_sheet():
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""
-        return df[COLUMNS] if not df.empty else pd.DataFrame(columns=COLUMNS)
+        return split_compact_description_fields(df[COLUMNS]) if not df.empty else pd.DataFrame(columns=COLUMNS)
     except Exception as e:
         st.error(f"❌ 读取云端数据失败:{e}")
         return pd.DataFrame(columns=COLUMNS)
@@ -101,7 +141,7 @@ def append_records_to_sheet(df_new):
     if df_new.empty:
         return
     ws = get_worksheet()
-    rows = df_new[COLUMNS].astype(str).fillna("").values.tolist()
+    rows = split_compact_description_fields(df_new)[COLUMNS].astype(str).fillna("").values.tolist()
     ws.append_rows(rows, value_input_option="USER_ENTERED")
 
 
@@ -111,7 +151,7 @@ def overwrite_sheet(df):
     ws.clear()
     ws.append_row(COLUMNS)
     if not df.empty:
-        rows = df[COLUMNS].astype(str).fillna("").values.tolist()
+        rows = split_compact_description_fields(df)[COLUMNS].astype(str).fillna("").values.tolist()
         ws.append_rows(rows, value_input_option="USER_ENTERED")
 
 
@@ -191,7 +231,7 @@ def parse_time(t):
 def calc_duration_and_efficiency(df):
     if df.empty:
         return df
-    df = df.copy()
+    df = split_compact_description_fields(df)
 
     # 检验员字段统一大写(避免 y 和 Y 在图表里分成两组)
     if "检验员" in df.columns:
@@ -296,6 +336,7 @@ if img_uploads:
         - 严格按照这10个表头输出:客户代码,生产工单号,客户料号,描述,数量,出货日期,检验数量,检验员,开始时间,结束时间
         - 原表左侧通常依次是"客户代码、客户名称、SO、生产工单号、客户料号、描述、数量、出货日期..."。其中"客户名称"和"SO"必须忽略,但忽略后不要窜列:客户代码仍然取最左数字列,生产工单号仍然取 SZ- 开头的生产工单号列。
         - 输出前自检每一行:客户代码应该是 5-6 位数字;生产工单号应该以 SZ- 开头。如果客户代码是 SZ- 开头,说明列错位了,必须修正后再输出。
+        - 如果"描述"单元格本身是类似 103234-042431 Z-5-T、103805-042525 H10-T、130550-041459 H-10-T 的短格式,请自动拆分:前 6 位数字填"客户代码",中间 6 位数字填"生产工单号",后面的 Z-5-T/H10-T/H-10-T 同时填入"客户料号"和"描述"。
         - **只输出有手写记录的行**:如果某一行的"检验数量"、"检验员"、"开始时间"、"结束时间"这 4 个手写字段全部为空,请直接跳过该行,不要返回。
         - 只要 4 个手写字段中任意一个填了内容,就保留该行,其他空字段留空。
         - 时间统一输出为 HH:MM 格式(例如 09:05、14:30)。
@@ -327,12 +368,14 @@ if img_uploads:
 
                     # 兜底过滤:4 个手写字段全为空的行直接丢弃(防止 AI 没听指令)
                     hand_cols = ["检验数量", "检验员", "开始时间", "结束时间"]
-                    def _is_blank(v):
+                    def _is_hand_field_blank(v):
                         return pd.isna(v) or str(v).strip() in ("", "nan", "None")
                     mask_has_data = current_df[hand_cols].apply(
-                        lambda row: not all(_is_blank(v) for v in row), axis=1
+                        lambda row: not all(_is_hand_field_blank(v) for v in row), axis=1
                     )
-                    current_df = current_df[mask_has_data].reset_index(drop=True)
+                    current_df = split_compact_description_fields(
+                        current_df[mask_has_data].reset_index(drop=True)
+                    )
 
                     if current_df.empty:
                         # 整页都没有手写记录,跳过
@@ -363,11 +406,11 @@ if img_uploads:
 
             # 一次性写入云端,避免多次 API 调用
             if all_new_rows:
-                combined_new = pd.concat(all_new_rows, ignore_index=True)
+                combined_new = split_compact_description_fields(pd.concat(all_new_rows, ignore_index=True))
                 try:
                     append_records_to_sheet(combined_new)
-                    st.session_state.batch_records = pd.concat(
-                        [st.session_state.batch_records, combined_new], ignore_index=True
+                    st.session_state.batch_records = split_compact_description_fields(
+                        pd.concat([st.session_state.batch_records, combined_new], ignore_index=True)
                     )
                     st.success(
                         f"✅ 成功识别 {success_count}/{len(image_items)} 张图片,"
@@ -421,7 +464,7 @@ if not st.session_state.batch_records.empty:
     with col_save:
         if st.button("💾 保存修改", type="primary", use_container_width=True):
             # 取出编辑后的原始数据(去掉删除列和计算列)
-            updated = edited_df[COLUMNS].copy().reset_index(drop=True)
+            updated = split_compact_description_fields(edited_df[COLUMNS].copy().reset_index(drop=True))
             try:
                 with st.spinner("☁️ 正在保存到云端..."):
                     overwrite_sheet(updated)
@@ -435,7 +478,7 @@ if not st.session_state.batch_records.empty:
         if st.button("🗑️ 删除选中行", use_container_width=True):
             keep_mask = ~edited_df["🗑️删除"].fillna(False)
             # 同时保留用户在其他列的编辑内容
-            new_records = edited_df.loc[keep_mask, COLUMNS].reset_index(drop=True)
+            new_records = split_compact_description_fields(edited_df.loc[keep_mask, COLUMNS].reset_index(drop=True))
             try:
                 with st.spinner("☁️ 正在同步到云端..."):
                     overwrite_sheet(new_records)
