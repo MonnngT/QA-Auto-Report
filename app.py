@@ -276,12 +276,6 @@ if img_uploads:
         - 请直接返回标准的 CSV 格式纯文本,不要包含任何 Markdown 标记。
         """
 
-        # 免费层配额提示:每张图片/每页 PDF 消耗 1 次请求
-        st.caption(
-            f"⏳ 免费层每天每个模型上限约 20 次请求。本次将识别 **{len(image_items)}** 张图片"
-            f"(每张消耗 1 次)。如接近上限,建议分批上传或升级付费层级。"
-        )
-
         if st.button("🚀 批量识别并保存到云端", type="primary", use_container_width=True):
             progress = st.progress(0)
             success_count = 0
