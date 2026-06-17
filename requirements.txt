@@ -4,4 +4,7 @@ Pillow
 pandas
 xlsxwriter
 openpyxl
+plotly
+gspread>=6.0.0
+google-auth>=2.30.0
 pypdfium2>=4.30.0
