@@ -29,7 +29,18 @@ except Exception:
 
 GSHEET_ID = st.secrets.get("GSHEET_ID", "")
 WORKSHEET_NAME = "检验记录"  # 工作表名(子表),程序会自动创建
-COLUMNS = ["描述", "数量", "出货日期", "检验数量", "检验员", "开始时间", "结束时间"]
+COLUMNS = [
+    "客户代码",
+    "生产工单号",
+    "客户料号",
+    "描述",
+    "数量",
+    "出货日期",
+    "检验数量",
+    "检验员",
+    "开始时间",
+    "结束时间",
+]
 
 
 @st.cache_resource(show_spinner=False)
@@ -55,7 +66,18 @@ def get_worksheet():
     # 如果第一行是空的(全新表),也补上表头
     first_row = ws.row_values(1)
     if not first_row:
-        ws.update("A1:G1", [COLUMNS])
+        ws.update("A1:J1", [COLUMNS])
+    elif [x.strip() for x in first_row] != COLUMNS:
+        records = ws.get_all_records()
+        df = pd.DataFrame(records)
+        for col in COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+        df = df[COLUMNS] if not df.empty else pd.DataFrame(columns=COLUMNS)
+        ws.clear()
+        ws.append_row(COLUMNS)
+        if not df.empty:
+            ws.append_rows(df.astype(str).fillna("").values.tolist(), value_input_option="USER_ENTERED")
     return ws
 
 
@@ -259,17 +281,22 @@ if img_uploads:
         你是一位专业的质量工程师助手。图片中是一张出货检验记录表,包含印刷文字和手写记录。
 
         任务:精准提取每行数据,并忽略无关信息。
-        我只需要你提取并返回以下 7 列数据:
-        1. 描述 (印刷的长描述。原始表头可能写作"描述"或"风扇描述",统一按"描述"输出)
-        2. 数量 (印刷的订单总数量。原始表头通常就叫"数量",代表这个订单一共有多少件,与"检验数量"不同)
-        3. 出货日期 (印刷的日期,如 "5/11"。保留原样输出,不要补全年份)
-        4. 检验数量 (人工手写的数字,代表实际抽检了多少件。原始表头可能写作"检验数量"或"风扇数量")
-        5. 检验员 (人工手写,可能是单个汉字姓如 '杨/王/田',也可能是汉字姓的首字母如 'Y/W/T'。统一规范化为**大写字母**输出:汉字"杨"输出"Y",汉字"王"输出"W",汉字"田"输出"T",汉字"周"输出"Z",其他汉字按拼音首字母大写。如果原本就是字母,统一转大写。)
-        6. 开始时间 (手写的时间,例如 11:30)
-        7. 结束时间 (手写的时间,例如 11:35)
+        我只需要你提取并返回以下 10 列数据:
+        1. 客户代码 (印刷列,通常是最左侧的数字代码,例如 103301、103294)
+        2. 生产工单号 (印刷列,通常以 SZ- 开头,例如 SZ-041317)
+        3. 客户料号 (印刷列,表头可能写作"客户料号")
+        4. 描述 (印刷的长描述。原始表头可能写作"描述"或"风扇描述",统一按"描述"输出)
+        5. 数量 (印刷的订单总数量。原始表头通常就叫"数量",代表这个订单一共有多少件,与"检验数量"不同)
+        6. 出货日期 (印刷的日期,如 "5/11"。保留原样输出,不要补全年份)
+        7. 检验数量 (人工手写的数字,代表实际抽检了多少件。原始表头可能写作"检验数量"或"风扇数量")
+        8. 检验员 (人工手写,可能是单个汉字姓如 '杨/王/田',也可能是汉字姓的首字母如 'Y/W/T'。统一规范化为**大写字母**输出:汉字"杨"输出"Y",汉字"王"输出"W",汉字"田"输出"T",汉字"周"输出"Z",其他汉字按拼音首字母大写。如果原本就是字母,统一转大写。)
+        9. 开始时间 (手写的时间,例如 11:30)
+        10. 结束时间 (手写的时间,例如 11:35)
 
         提取规则:
-        - 严格按照这7个表头输出:描述,数量,出货日期,检验数量,检验员,开始时间,结束时间
+        - 严格按照这10个表头输出:客户代码,生产工单号,客户料号,描述,数量,出货日期,检验数量,检验员,开始时间,结束时间
+        - 原表左侧通常依次是"客户代码、客户名称、SO、生产工单号、客户料号、描述、数量、出货日期..."。其中"客户名称"和"SO"必须忽略,但忽略后不要窜列:客户代码仍然取最左数字列,生产工单号仍然取 SZ- 开头的生产工单号列。
+        - 输出前自检每一行:客户代码应该是 5-6 位数字;生产工单号应该以 SZ- 开头。如果客户代码是 SZ- 开头,说明列错位了,必须修正后再输出。
         - **只输出有手写记录的行**:如果某一行的"检验数量"、"检验员"、"开始时间"、"结束时间"这 4 个手写字段全部为空,请直接跳过该行,不要返回。
         - 只要 4 个手写字段中任意一个填了内容,就保留该行,其他空字段留空。
         - 时间统一输出为 HH:MM 格式(例如 09:05、14:30)。
@@ -293,7 +320,7 @@ if img_uploads:
                     current_df = pd.read_csv(io.StringIO(csv_content))
                     current_df.columns = current_df.columns.str.strip()
 
-                    # 仅保留 5 个标准列
+                    # 仅保留标准列
                     for col in COLUMNS:
                         if col not in current_df.columns:
                             current_df[col] = ""
@@ -369,7 +396,7 @@ if not st.session_state.batch_records.empty:
     df_editable.index = range(1, len(df_editable) + 1)
     df_editable.index.name = "序号"
 
-    st.caption("💡 提示:可直接在表格中修改 **描述、数量、出货日期、检验数量、检验员、开始时间、结束时间**(识别错误时手动修正)。改完点【💾 保存修改】生效。时长、效率、抽检率会自动重新计算。")
+    st.caption("💡 提示:可直接在表格中修改 **客户代码、生产工单号、客户料号、描述、数量、出货日期、检验数量、检验员、开始时间、结束时间**(识别错误时手动修正)。改完点【💾 保存修改】生效。时长、效率、抽检率会自动重新计算。")
 
     edited_df = st.data_editor(
         df_editable,
@@ -385,7 +412,7 @@ if not st.session_state.batch_records.empty:
             "效率(件/分钟)": st.column_config.NumberColumn(format="%.2f", disabled=True, help="由检验数量÷时长自动计算"),
             "抽检率(%)": st.column_config.NumberColumn(format="%.1f", disabled=True, help="由检验数量÷数量自动计算"),
         },
-        # 只锁定计算列,7 列原始数据允许编辑
+        # 只锁定计算列,10 列原始数据允许编辑
         disabled=["时长(分钟)", "效率(件/分钟)", "抽检率(%)"],
         key="data_editor",
     )
@@ -394,7 +421,7 @@ if not st.session_state.batch_records.empty:
 
     with col_save:
         if st.button("💾 保存修改", type="primary", use_container_width=True):
-            # 取出编辑后的 5 列原始数据(去掉删除列和计算列)
+            # 取出编辑后的原始数据(去掉删除列和计算列)
             updated = edited_df[COLUMNS].copy().reset_index(drop=True)
             try:
                 with st.spinner("☁️ 正在保存到云端..."):
@@ -537,7 +564,7 @@ if not st.session_state.batch_records.empty:
             with st.expander("📋 查看该型号的全部检验明细"):
                 st.dataframe(
                     model_df[
-                        ["检验员", "检验数量", "开始时间", "结束时间", "时长(分钟)", "效率(件/分钟)"]
+                        ["客户代码", "生产工单号", "客户料号", "检验员", "检验数量", "开始时间", "结束时间", "时长(分钟)", "效率(件/分钟)"]
                     ].reset_index(drop=True),
                     use_container_width=True,
                 )
